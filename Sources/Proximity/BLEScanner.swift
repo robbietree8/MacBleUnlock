@@ -43,11 +43,12 @@ final class BLEScanner: NSObject {
 
     /// 无样本多久后从菜单列表移除。仅影响展示，不参与靠近判定。
     private let expiryInterval: TimeInterval = 15
-    /// `readRSSI()` 轮询间隔。每次调用是一次 BLE 往返，1s 足够且不扰民。
-    private let rssiPollInterval: TimeInterval = 1
     /// 每隔多少次 tick 重新枚举系统已连接设备。
-    /// 每秒跑一次接管扫描。实测断连到重新接管有 3–4s 空档，其中大部分是
-    /// 系统级连接自己在重连，但把轮询降到 1s 仍能削掉属于我们那一部分。
+    ///
+    /// tick 就是 1s（见 `start()`），所以 `1` 等于每秒跑一次接管扫描，
+    /// 同时 `pollConnectedRSSI()` 也是每秒一次 `readRSSI()`（一次 BLE 往返，够了）。
+    /// 实测断连到重新接管有 3–4s 空档，其中大部分是系统级连接自己在重连，
+    /// 但把轮询降到 1s 仍能削掉属于我们那一部分。
     private let adoptEveryNTicks = 1
 
     /// 用于 `retrieveConnectedPeripherals` 的服务 UUID。
@@ -110,6 +111,10 @@ final class BLEScanner: NSObject {
         }
     }
 
+    /// 菜单用的行：同名设备合成一行（同一台设备的两个地址在菜单里会显示成两行）。
+    /// 监听和重绑仍然用原始 `devices` / `sortedDevices`。
+    var deviceGroups: [DeviceGroup] { DeviceGrouping.groups(from: sortedDevices) }
+
     // MARK: - 定时任务
 
     private func tick() {
@@ -126,6 +131,7 @@ final class BLEScanner: NSObject {
         let stale = devices.filter { now - $0.value.seenAt > expiryInterval }.map(\.key)
         guard !stale.isEmpty else { return }
         for key in stale { devices.removeValue(forKey: key) }
+        logDeviceList("expire")
         onDevicesChanged?()
     }
 
@@ -198,10 +204,25 @@ final class BLEScanner: NSObject {
         let isNew = devices[uuid] == nil
         devices[uuid] = DeviceSample(uuid: uuid, name: name ?? devices[uuid]?.name, rssi: rssi, seenAt: now)
         if isNew {
-            Log.ble.debug("device.discovered uuid=\(uuid.uuidString, privacy: .public) name=\(name ?? "-", privacy: .public) rssi=\(rssi, privacy: .public)")
+            Log.ble.notice("device.discovered uuid=\(uuid.uuidString, privacy: .public) name=\(name ?? "-", privacy: .public) rssi=\(rssi, privacy: .public)")
+            logDeviceList("add")
             onDevicesChanged?()
         }
         onSample?(uuid, name ?? devices[uuid]?.name, rssi)
+    }
+
+    /// 把菜单能看到的那份列表打进日志。
+    ///
+    /// 出现「重复设备」/「设备漏了」时，这是唯一的现场证据：菜单是快照、没有历史，
+    /// 而 `device.discovered` 原本是 debug 级 —— `log show` 默认根本不落盘。
+    /// 同时打 `groups=`：同名但不同 uuid 的设备在菜单里会合成一行，
+    /// 对照原始列表就能看出到底是不是同一台设备的两个地址。
+    private func logDeviceList(_ reason: String) {
+        let rows = sortedDevices.map { device in
+            let connected = connectedPeripherals[device.uuid] != nil ? " connected" : ""
+            return "[\(device.uuid.uuidString) \(device.name ?? "-") \(device.rssi)dBm\(connected)]"
+        }
+        Log.ble.notice("device.list reason=\(reason, privacy: .public) count=\(self.devices.count, privacy: .public) groups=\(self.deviceGroups.count, privacy: .public) \(rows.joined(separator: " "), privacy: .public)")
     }
 }
 

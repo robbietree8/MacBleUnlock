@@ -40,6 +40,8 @@ final class AppState {
     private(set) var lastEventText = "—"
     private(set) var lockFailed = false
     private(set) var hasStoredPassword = false
+    /// 钥匙串里有条目、但属于别的签名身份读不出来。菜单据此给出「先删掉旧条目」的出口。
+    private(set) var passwordUnreadable = false
 
     /// 菜单「立即锁定」置位；必须等设备先离开再靠近才恢复自动解锁。
     private(set) var manualLock = false
@@ -83,6 +85,7 @@ final class AppState {
 
         screen.start()
         refreshPasswordStatus()
+        refreshAccessibilityTrust(logAlways: true)
         startMenuTrackingObservation()
         refreshMenuSnapshot(force: true)
 
@@ -129,7 +132,28 @@ final class AppState {
     }
 
     func refreshPasswordStatus() {
-        hasStoredPassword = KeychainPassword.isSet
+        // 钥匙串调用可能弹授权框并阻塞线程 —— 必须离开主线程。
+        Task { [weak self] in
+            let result = await KeychainPassword.load()
+            self?.applyPasswordStatus(result)
+        }
+    }
+
+    private func applyPasswordStatus(_ result: KeychainPassword.LoadResult) {
+        switch result {
+        case .password(let value) where !value.isEmpty:
+            hasStoredPassword = true
+            passwordUnreadable = false
+        case .password, .missing:
+            hasStoredPassword = false
+            passwordUnreadable = false
+        case .unavailable(let status):
+            // 旧签名身份留下的条目：系统设置里看得出它存在，我们却读不出来。
+            hasStoredPassword = false
+            passwordUnreadable = true
+            Log.app.error("password.unreadable status=\(status, privacy: .public)（换过签名证书后旧条目属于旧身份，重设一次登录密码即可）")
+        }
+        Log.app.notice("password.status stored=\(self.hasStoredPassword, privacy: .public) unreadable=\(self.passwordUnreadable, privacy: .public)")
     }
 
     /// 菜单「设置登录密码…」。密码只写进钥匙串，不落盘、不记日志。
@@ -153,20 +177,30 @@ final class AppState {
             Log.app.notice("password.prompt empty, ignored")
             return
         }
-        do {
-            try KeychainPassword.save(password)
-            refreshPasswordStatus()
-            Log.app.notice("password.saved")
-        } catch {
-            Log.app.error("password.save failed: \(String(describing: error), privacy: .public)")
-            presentError("无法保存密码", detail: String(describing: error))
+        saveLoginPassword(password)
+    }
+
+    /// 写钥匙串同样可能弹授权框（覆盖旧签名身份的条目时），所以也放后台线程：
+    /// 用户看到的授权框由系统弹出，这里只是不让主线程陪着一起等。
+    private func saveLoginPassword(_ password: String) {
+        Task { [weak self] in
+            do {
+                try await KeychainPassword.save(password)
+                Log.app.notice("password.saved")
+                self?.refreshPasswordStatus()
+            } catch {
+                Log.app.error("password.save failed: \(String(describing: error), privacy: .public)")
+                self?.presentError("无法保存密码", detail: String(describing: error))
+            }
         }
     }
 
     func clearLoginPassword() {
-        KeychainPassword.delete()
-        refreshPasswordStatus()
-        Log.app.notice("password.cleared")
+        Task { [weak self] in
+            let status = await KeychainPassword.delete()
+            Log.app.notice("password.cleared status=\(status, privacy: .public)")
+            self?.refreshPasswordStatus()
+        }
     }
 
     private func presentError(_ message: String, detail: String) {
@@ -198,6 +232,13 @@ final class AppState {
     }
 
     /// 菜单里「设备」子菜单的绑定。
+    /// 同一台设备可能有多个 uuid（identity 地址 + 私有地址），菜单里它们合成一行，
+    /// 所以勾选状态按**名字**判定：代表样本的 uuid 会随着两个地址的强弱来回变，按 uuid 判会闪。
+    func isMonitored(_ group: DeviceGroup) -> Bool {
+        if !group.name.isEmpty, monitoredName == group.name { return true }
+        return monitoredUUID == group.representative.uuid
+    }
+
     var deviceSelection: UUID? {
         get { monitoredUUID }
         set {
@@ -214,7 +255,7 @@ final class AppState {
     // 所以菜单只读这份快照：内容真的变了才赋值，最多 1 秒一更，且菜单显示期间完全冻结。
 
     private(set) var menuStatusText = "启动中"
-    private(set) var menuDevices: [DeviceSample] = []
+    private(set) var menuDeviceGroups: [DeviceGroup] = []
     private(set) var menuBluetoothAvailable = false
 
     @ObservationIgnored private var lastMenuRefresh: TimeInterval = 0
@@ -252,7 +293,35 @@ final class AppState {
         let events = engine.tick(at: Date().timeIntervalSince1970)
         syncEngineState()
         handle(events: events)
+        refreshAccessibilityTrust()
         refreshMenuSnapshot()
+    }
+
+    // MARK: - 辅助功能授权
+
+    /// 辅助功能授权的快照。菜单读这个值，**不能**直接在视图里问 TCC：
+    /// `Permissions.isAccessibilityTrusted` 不是被观察的属性，授权状态变了菜单也不会
+    /// 重建，标题就永远停在旧值上（系统设置里明明已开启、菜单仍显示「未授予」）。
+    private(set) var accessibilityTrusted = false
+
+    /// 菜单里点「辅助功能权限」时走这里。
+    func requestAccessibility() {
+        if Permissions.isAccessibilityTrusted {
+            Permissions.openAccessibilitySettings()
+        } else {
+            Permissions.promptAccessibility()
+            Permissions.openAccessibilitySettings()
+        }
+        Permissions.logAccessibilityState("menu")
+        refreshAccessibilityTrust()
+    }
+
+    private func refreshAccessibilityTrust(logAlways: Bool = false) {
+        let trusted = Permissions.isAccessibilityTrusted
+        if logAlways || trusted != accessibilityTrusted {
+            Permissions.logAccessibilityState(trusted ? "granted" : "revoked")
+        }
+        accessibilityTrusted = trusted
     }
 
     // MARK: - 菜单快照的生成
@@ -295,8 +364,8 @@ final class AppState {
         let text = liveStatusText
         if text != menuStatusText { menuStatusText = text }
 
-        let devices = scanner.sortedDevices
-        if devices != menuDevices { menuDevices = devices }
+        let groups = scanner.deviceGroups
+        if groups != menuDeviceGroups { menuDeviceGroups = groups }
 
         if scanner.bluetoothAvailable != menuBluetoothAvailable {
             menuBluetoothAvailable = scanner.bluetoothAvailable

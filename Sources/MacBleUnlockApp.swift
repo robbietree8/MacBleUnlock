@@ -30,6 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.app.notice("app.launch test host, background machinery not started")
             return
         }
+        // 启动就把辅助功能授权与自己的签名指纹记下来：授权与签名身份绑定，
+        // 「系统设置里开着但 App 说未授予」几乎都是换过证书，日志里能直接对上。
+        Permissions.logAccessibilityState("launch")
         AppState.shared.start()
     }
 

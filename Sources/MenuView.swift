@@ -49,20 +49,18 @@ struct MenuView: View {
         Divider()
 
         Button(accessibilityTitle) {
-            if Permissions.isAccessibilityTrusted {
-                Permissions.openAccessibilitySettings()
-            } else {
-                Permissions.promptAccessibility()
-                Permissions.openAccessibilitySettings()
-            }
+            app.requestAccessibility()
         }
 
-        Button(app.hasStoredPassword ? "更新登录密码…" : "设置登录密码…") {
+        Button(passwordButtonTitle) {
             app.promptForLoginPassword()
         }
 
         if app.hasStoredPassword {
             Button("清除登录密码") { app.clearLoginPassword() }
+        }
+        if app.passwordUnreadable {
+            Button("删除旧钥匙串条目") { app.clearLoginPassword() }
         }
 
         Divider()
@@ -84,28 +82,36 @@ struct MenuView: View {
     }
 
     private var accessibilityTitle: String {
-        Permissions.isAccessibilityTrusted ? "辅助功能权限：已授予" : "辅助功能权限：未授予（点击申请）"
+        app.accessibilityTrusted ? "辅助功能权限：已授予" : "辅助功能权限：未授予（点击申请）"
+    }
+
+    /// 换过签名证书后，钥匙串里属于旧身份的条目会读不出来（历史上它还会把 App 卡在启动阶段）。
+    /// 菜单必须把这两种情况分开说，否则用户只会看到「设置登录密码」而不知道旧条目还在。
+    private var passwordButtonTitle: String {
+        if app.hasStoredPassword { return "更新登录密码…" }
+        if app.passwordUnreadable { return "设置登录密码…（旧条目不可读）" }
+        return "设置登录密码…"
     }
 
     /// 菜单里**只能**读低频率的状态：快照（menuXxx）、设置项、以及很少变的状态。
     /// 直接读 `scanner.xxx` / `smoothedRSSI` 会让菜单每秒重建几十次，子菜单就会一直闪。
     private var deviceMenu: some View {
         Menu("设备") {
-            if app.menuDevices.isEmpty {
+            if app.menuDeviceGroups.isEmpty {
                 Text(app.menuBluetoothAvailable ? "未发现设备" : "蓝牙不可用")
             } else {
-                ForEach(app.menuDevices, id: \.uuid) { device in
-                    Toggle(label(for: device), isOn: Binding(
-                        get: { app.monitoredUUID == device.uuid },
-                        set: { isOn in if isOn { app.selectDevice(device) } }
+                ForEach(app.menuDeviceGroups, id: \.id) { group in
+                    Toggle(label(for: group), isOn: Binding(
+                        get: { app.isMonitored(group) },
+                        set: { isOn in if isOn { app.selectDevice(group.representative) } }
                     ))
                 }
             }
         }
     }
 
-    private func label(for device: DeviceSample) -> String {
-        let name = device.name ?? device.uuid.uuidString.prefix(8).description
-        return "\(name)  \(device.rssi) dBm"
+    private func label(for group: DeviceGroup) -> String {
+        let name = group.name.isEmpty ? group.representative.uuid.uuidString.prefix(8).description : group.name
+        return "\(name)  \(group.representative.rssi) dBm"
     }
 }

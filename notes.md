@@ -218,6 +218,97 @@ dlopen OK, SACLockScreenImmediate=0x1991b9b3c
 Release 用 `CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO`，否则会注入
 `com.apple.security.get-task-allow`，允许 `task_for_pid` 附加到发布产物。
 
+### 发布：Developer ID + 公证（scripts/release.sh）
+
+Release 配置里的身份是 `Developer ID Application` + `DEVELOPMENT_TEAM`，Debug 仍然是
+自签名 `MacBleUnlock Dev` —— 单测宿主必须用能加载 `MacBleUnlock.debug.dylib` 的身份。
+
+用自签名身份跑 `release.sh --skip-notarize` 验证签名配置时，必须把 team 置空：
+`MBU_TEAM_ID= bash scripts/release.sh --skip-notarize`。否则 `xcodebuild` 会带着
+`DEVELOPMENT_TEAM=55L6785UNH` 去找证书，而自签名证书不属于任何 team，签名直接失败。
+
+两个断言对「交给用户的那个文件」是真检查（实测未公证的自签名产物）：
+
+```
+$ xcrun stapler validate /tmp/x/MacBleUnlock.app
+MacBleUnlock.app does not have a ticket stapled to it.   # 退出码 65
+$ spctl -a -t exec -vv /tmp/x/MacBleUnlock.app
+/tmp/x/MacBleUnlock.app: rejected
+```
+
+所以 `release.sh` 把 zip 解压、把 dmg 挂载之后逐个再跑一遍这两个命令，而不是只信
+构建目录里的那个 `.app`。注意 `stapler validate` 会去 Apple 取 `DeveloperIDTicket`
+记录（`-v` 里能看到下载动作），不是纯离线检查。
+
+### Xcode 不会自动加 --timestamp
+
+实测：Release 用 Developer ID 签名、但没设 `OTHER_CODE_SIGN_FLAGS: "--timestamp"` 时，
+产物的签名里**没有**安全时间戳：
+
+```
+$ codesign -dvvv MacBleUnlock.app | grep -E "Authority|Timestamp|Signed Time"
+Authority=Developer ID Application: Zhonggao Wang (55L6785UNH)
+Timestamp=Sep 27, 2026 at 17:42:54        # 加上 --timestamp 之后才有
+Signed Time=Sep 27, 2026 at 17:42:36      # 没加的时候只有这一行
+```
+
+公证强制要求安全时间戳，所以它写在 Release 配置里（签名时联网向 Apple 的时间戳服务取，
+离线签发会失败）。`release.sh` 把它当作签名的硬断言，缺了就中止，不会白等一次公证。
+
+签名正确但不公证，Gatekeeper 的判词和自签名不一样 —— 能看出差在哪一步：
+
+```
+$ spctl -a -t exec -vv MacBleUnlock.app
+MacBleUnlock.app: rejected
+source=Unnotarized Developer ID
+origin=Developer ID Application: Zhonggao Wang (55L6785UNH)   # 退出码 3
+```
+
+### notarytool 要显式给 --keychain
+
+本机实测：`store-credentials` 报「Success. Credentials validated.」，紧接着
+`notarytool history --keychain-profile mbu-notary` 却说找不到那条条目；
+带上 `--keychain ~/Library/Keychains/login.keychain-db` 立刻正常。
+
+所以 `release.sh` 总是显式传 `--keychain`（默认取 `security default-keychain -d user`，
+可用 `MBU_NOTARY_KEYCHAIN` 覆盖），history / submit / log / 提示文案四个地方都一致。
+
+### /bin/bash 3.2 会把全角字符吃进变量名
+
+`$VAR` 后面紧跟全角字符（`）`、`，`、`」` …）时，macOS 自带 bash 3.2 会把那个字符的
+字节当成变量名的一部分，`set -u` 下就报（变量名尾部会多出一个不可打印字节）：
+
+```
+scripts/release.sh: line 138: SUBMISSION<替换字符>: unbound variable
+```
+
+同一段代码在 bash 5 下不会报。中文输出紧挨变量时一律加花括号：`${SUBMISSION}）。`
+
+### dlopen 的目标在磁盘上不存在
+
+`/System/Library/PrivateFrameworks/login.framework/Versions/A/` 下只有
+`Frameworks/ Resources/ XPCServices/ _CodeSignature/`，没有 `login` 文件 ——
+二进制在 dyld 共享缓存里，`dlopen` 照常解析（见上面的探针）。所以
+`codesign -dvvv` 那个路径会失败（No such file），别拿它判断私有 API 还在不在。
+
+## 图标
+
+`Resources/AppIcon.icns` 是生成物，由 `scripts/make-icon.swift` 用 CoreGraphics 矢量重画
+（仓库里不存设计稿）：深蓝渐变圆角方块 + 白色挂锁 + 两侧信号弧。改设计就改脚本重生成。
+
+```bash
+swift scripts/make-icon.swift Resources/AppIcon.icns                          # 重新生成
+MBU_ICONSET_DIR=/tmp/icon swift scripts/make-icon.swift /tmp/icon/AppIcon.icns # 留下 iconset 逐个尺寸看
+```
+
+两条实测约束：
+
+- `iconutil` 要**完整 10 个文件**，缺一个只报 `Failed to generate ICNS.`，不说是缺哪个 ——
+  `icon_16x16@2x.png` 与 `icon_32x32.png` 像素相同但必须各写一份。
+- 每个尺寸都按矢量重画，而不是缩 1024 那张：16pt 下信号弧自然糊进背景，只剩挂锁轮廓读得出来。
+
+`LSUIElement: true` 所以没有 Dock 图标，这个图标出现在访达 / 聚焦 / 权限弹框里。
+
 ## 测试
 
 ### 单测宿主不启动后台机制
@@ -226,6 +317,56 @@ Release 用 `CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO`，否则会注入
 里用 `XCTestConfigurationFilePath` 判断是否在跑测试，是就直接 return ——
 否则一次 `xcodebuild test` 会启动 BLE 扫描，设备一「离开」就可能把用户的屏幕锁上。
 日志里会看到 `app.launch test host, background machinery not started`。
+
+（注意：单测跑在 App 进程里，日志写的是同一个 subsystem —— 用 `log show` 排查真机问题时
+会看到测试制造的行，比如 `DeviceIdentityTests` 的 `device.remap.ambiguous`。）
+
+### 设备列表按名字合并（只合并展示）
+
+同一台设备经常以两个 `CBPeripheral.identifier` 出现：identity 地址 + 可解析私有地址。
+实测日志（`device.list`）里同时存在、RSSI 只差 1dBm：
+
+```
+[7C761E5C… AVATRKEYTK505028 -88dBm]  [764651F9… AVATRKEYTK505028 -89dBm]
+[58105F18… mobike -91dBm]            [EC09F3E2… mobike -92dBm]
+```
+
+菜单按 uuid 渲染，于是同一台设备占两行。`DeviceGrouping` 按**名字**合成一行（没名字的
+不合并），代表样本取组内 RSSI 最强的那条，选中它就把监听绑到它的 uuid 上。
+
+合并只作用于展示：监听的样本过滤和设备重绑仍然用原始 uuid 列表。否则「两台同名设备」
+会被当成一台，人走了却不锁屏 —— 那个方向是不安全的（`DeviceIdentity.resolve` 的同名歧义
+拒绝重绑也是同一个道理）。
+
+### 钥匙串调用绝不能上主线程
+
+实测卡死现场（`sample` 进程）：主线程停在
+`AppState.refreshPasswordStatus → KeychainPassword.load → SecItemCopyMatching`，
+`AppState.start()` 没跑完 —— BLE 不启动、菜单不动，看起来就是 App 卡死。
+触发条件是换签名证书：旧条目属于旧身份，读它就弹系统授权框，而框没人点。
+
+所以 `KeychainPassword` 只对外提供 async 接口，内部跑在自家串行队列上。
+
+两个实测结论（各用一次性探针验过）：
+
+- 旧式钥匙串的访问控制绑的是**指定要求**（team + bundle id），不是 cdhash：
+  两个 cdhash 不同、证书与 bundle id 相同的二进制能互读对方创建的条目，不弹框。
+  所以换证书后重设一次密码，以后重建都不再弹。
+- 「数据保护钥匙串」（`kSecUseDataProtectionKeychain`）走不通：Developer ID 签名、
+  无 provisioning profile 的 App 拿到 `errSecMissingEntitlement (-34018)`。
+
+### 辅助功能授权与签名身份
+
+TCC 行绑定代码签名身份。换证书后系统设置里那一行还在、还开着，但属于旧身份，
+新二进制判定未授予。日志里带上 cdhash / team / 路径，这种情况一眼能认：
+
+```
+auth.accessibility trusted=false cdhash=… team=55L6785UNH context=launch path=/Applications/MacBleUnlock.app
+```
+
+菜单标题读的是 `AppState.accessibilityTrusted`（每秒刷新一次），**不是**直接在视图里调
+`AXIsProcessTrusted()`：后者不进观察图，授权状态变了菜单也不会重建，标题会停在旧值上。
+清除旧记录用 `tccutil reset Accessibility com.robbietree.MacBleUnlock`，重新授权只能手动点。
 
 ### 锁屏投票的三方规则
 

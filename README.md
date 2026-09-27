@@ -50,7 +50,7 @@ open -a /Applications/MacBleUnlock.app
 | 菜单项 | 说明 |
 | --- | --- |
 | 状态行 | `iPhone · -53 dBm · 附近` / `· 已离开` / `· 未检测到` |
-| **设备** | 发现到的 BLE 设备及其实时 RSSI，选中一项即开始监听 |
+| **设备** | 发现到的 BLE 设备及其实时 RSSI，选中一项即开始监听。同名设备合成一行（同一台设备常有两个 BLE 地址）|
 | 靠近时解锁 | 解锁阈值：关闭 / -50 / -60 / -70 / -80 |
 | 远离时锁定 | 锁屏阈值：关闭 / -70 / -80 / -90 |
 | 离开判定延迟 | 3 / 5 / 10 / 30 秒 |
@@ -136,9 +136,47 @@ log stream --predicate 'subsystem == "com.robbietree.MacBleUnlock"' --level debu
 日志会写明原因：`unlock.skip no accessibility permission`、`unlock.skip no stored password`、
 或 `unlock.abort votes=… `（投票未通过时会附带三个信号的实际取值）。
 
-## 分发：别人能用吗
+**辅助功能权限：系统设置里明明开着，菜单却写「未授予」。**
 
-**现状：直接把这个 `.app` 发给别人，对方打不开。**
+TCC 的授权是绑在**代码签名身份**上的。换过证书（比如从自签名换成 Developer ID）之后，
+系统设置里那一行还在、还开着，但它记的是旧身份，新二进制判定为未授权。日志里能直接看出来：
+
+```bash
+log show --predicate 'subsystem == "com.robbietree.MacBleUnlock"' --last 10m | grep auth.accessibility
+# auth.accessibility trusted=false cdhash=… team=… path=/Applications/MacBleUnlock.app
+```
+
+修法：清掉旧记录，再重新授权（这一步只能人来点，TCC 没有命令行授予）：
+
+```bash
+tccutil reset Accessibility com.robbietree.MacBleUnlock
+```
+
+然后点菜单里的「辅助功能权限：未授予（点击申请）」→ 在系统设置里打开 MacBleUnlock 的开关。
+授权后菜单 1 秒内变成「已授予」，不用重启 App（日志会打出 `trusted=true`）。
+
+**设备列表里同一台设备出现两行。**
+
+同一台设备常常有两个 BLE 地址（identity 地址 + 可解析私有地址），菜单以前会显示两行。
+现在菜单按名字合成一行，看原始 uuid 列表和合并结果：
+
+```bash
+log show --predicate 'subsystem == "com.robbietree.MacBleUnlock"' --last 5m | grep device.list
+# device.list reason=add count=26 groups=25 [uuid 名字 -49dBm] [uuid 名字 -51dBm] …
+```
+
+**登录密码读不出来 / App 卡在启动阶段。**
+
+钥匙串条目同样按签名身份授权，换证书后旧条目属于旧身份。钥匙串调用现在全部在后台线程
+（历史上它曾把主线程卡死在系统授权框上：BLE 不启动、菜单不动），读不出来时菜单会写
+「设置登录密码…（旧条目不可读）」并多出「删除旧钥匙串条目」。重设一次密码即可 ——
+同证书重新构建不会再弹框（访问控制绑的是指定要求，不是 cdhash）。
+
+## 分发
+
+### 自签名构建只能自己用
+
+直接把本机自签名（身份 `MacBleUnlock Dev`）的 `.app` 发给别人，对方打不开：
 
 ```
 $ spctl -a -t exec -vv /Applications/MacBleUnlock.app
@@ -150,15 +188,50 @@ origin=MacBleUnlock Dev
 右键 → 打开，或 系统设置 → 隐私与安全性 → 「仍要打开」，或 `xattr -d com.apple.quarantine`。
 而且签名身份只存在于你自己机器的钥匙串里 —— **不要把自己的签名私钥给别人**。
 
-**推荐做法：让对方自己从源码构建**（命令同「安装」）。这样 TCC 授权和钥匙串条目
+零成本做法：**让对方自己从源码构建**（命令同「安装」）。这样 TCC 授权和钥匙串条目
 干净地属于他自己，也不用改任何签名配置。需要 Xcode + Swift 6 工具链。
 
-**要做到「下载即用」**需要 Apple Developer Program（99 USD/年）：
-换成 `Developer ID Application` 证书 → 公证（`xcrun notarytool submit … --wait`
-再 `xcrun stapler staple`）。hardened runtime 已经在 Release 配置里开好了。
+### 要「下载即用」：Developer ID + 公证
 
-**上不了 Mac App Store**：上架强制 App Sandbox，而本 App 靠 `CGEvent` 注入密码
-和私有 API `SACLockScreenImmediate`，沙盒下做不出来。只能官网 / GitHub Releases 直传。
+需要付费的 Apple Developer Program（99 USD/年）。下面两件事各做一次：
+
+```bash
+# 1. 签一张 Developer ID Application 证书
+#    Xcode → Settings → Accounts → Manage Certificates → + → Developer ID Application
+#    只有 Account Holder（个人）或 Account Holder / Admin（组织）能签；
+#    免费 Apple ID 只有 Apple Development，做不了公证。
+
+# 2. 存公证凭据（密码是 appleid.apple.com 上的 App 专用密码）
+xcrun notarytool store-credentials mbu-notary \
+  --apple-id <Apple ID> --team-id 55L6785UNH --password <App 专用密码>
+```
+
+之后每次发布就一条命令：
+
+```bash
+bash scripts/release.sh
+```
+
+注意：只签名不公证仍然会被拦 —— `spctl` 给的是 `rejected / source=Unnotarized Developer ID`，
+所以公证不是可选项。
+
+它会：Release 构建 → 校验签名（身份 / hardened runtime / TeamIdentifier / 无 get-task-allow）
+→ `notarytool submit --wait` → `stapler staple` → 打包 `dist/MacBleUnlock-<版本>.zip` 与 `.dmg`
+→ **把 zip 解压、把 dmg 挂载，各自再过一遍 `spctl`**，确认用户拿到手的那个文件确实是
+`accepted / source=Notarized Developer ID`。产物直接传 GitHub Releases。
+
+`bash scripts/release.sh --skip-notarize` 只构建 + 校验 + 打包（验证签名配置用，产物不能分发）。
+
+换签名的副作用：TCC 授权（蓝牙、辅助功能）和钥匙串里的登录密码条目都绑定签名身份，
+从 `MacBleUnlock Dev` 换成 Developer ID 后你自己机器上要重新授权一次；
+此后只要 bundle id 和证书不变，用户升级不会掉授权。
+
+### 上不了 Mac App Store
+
+上架强制 App Sandbox，而本 App 靠辅助功能权限 + `CGEvent` 注入密码和私有 API
+`SACLockScreenImmediate`，沙盒下做不出来。只能官网 / GitHub Releases 直传。
+公证只查签名与恶意软件，不做 App Store 那种私有 API 扫描 —— 但 Apple 随时可能改掉
+`SACLockScreenImmediate`，届时自动回落到合成 Ctrl-Cmd-Q。
 
 ### 每个人拿到后都必须自己做的事
 

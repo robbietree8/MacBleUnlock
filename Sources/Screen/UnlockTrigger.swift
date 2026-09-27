@@ -42,8 +42,14 @@ final class UnlockTrigger {
             Log.screen.notice("unlock.skip no accessibility permission")
             return
         }
-        guard let password = KeychainPassword.load(), !password.isEmpty else {
-            Log.screen.notice("unlock.skip no stored password")
+        // 读钥匙串可能弹授权框（旧签名身份的条目），**不能**放在主线程上等。
+        let stored = await KeychainPassword.load()
+        guard case .password(let password) = stored, !password.isEmpty else {
+            if case .unavailable(let status) = stored {
+                Log.screen.error("unlock.skip password unreadable status=\(status, privacy: .public)")
+            } else {
+                Log.screen.notice("unlock.skip no stored password")
+            }
             return
         }
 

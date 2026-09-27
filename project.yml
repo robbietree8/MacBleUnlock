@@ -12,6 +12,7 @@ settings:
     SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     CODE_SIGN_STYLE: Manual
+    # 本地开发与单测身份（scripts/make-signing-cert.sh 创建）。发布身份在 Release 配置里覆盖。
     CODE_SIGN_IDENTITY: "MacBleUnlock Dev"
     CODE_SIGNING_REQUIRED: YES
     CODE_SIGNING_ALLOWED: YES
@@ -26,14 +27,18 @@ targets:
     platform: macOS
     sources:
       - path: Sources
+      # 图标是生成物，但入库：改设计就改 scripts/make-icon.swift 再重新生成。
+      - path: Resources/AppIcon.icns
+        buildPhase: resources
     info:
       path: Resources/Info.plist
       properties:
         CFBundleDevelopmentRegion: en
-        CFBundleShortVersionString: "1.0"
+        CFBundleShortVersionString: "1.0.0"
         CFBundleVersion: "1"
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         LSUIElement: true
+        CFBundleIconFile: AppIcon
         NSBluetoothAlwaysUsageDescription: MacBleUnlock 需要蓝牙来检测配对的设备距离。
         NSHumanReadableCopyright: Copyright © 2026 robbietree. MIT License.
     entitlements:
@@ -42,7 +47,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.robbietree.MacBleUnlock
         PRODUCT_NAME: MacBleUnlock
-        MARKETING_VERSION: "1.0"
+        MARKETING_VERSION: "1.0.0"
         CURRENT_PROJECT_VERSION: "1"
         COMBINE_HIDPI_IMAGES: YES
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
@@ -62,6 +67,14 @@ targets:
           # 发布构建不应可被调试（get-task-allow 会允许 task_for_pid 附加）。
           # Debug 保留，否则 XCTest 无法注入测试宿主。
           CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+          # 分发用 Developer ID（直传 + 公证，见 README「分发」和 scripts/release.sh）。
+          # 只写证书类型，具体的证书由 DEVELOPMENT_TEAM 解析；base 里的自签名身份
+          # 只用于 Debug（本地开发和单测），别拿去发布 —— Gatekeeper 会拒。
+          CODE_SIGN_IDENTITY: "Developer ID Application"
+          DEVELOPMENT_TEAM: "55L6785UNH"
+          # 公证强制要求安全时间戳，而 Xcode 本地构建不会自己加（实测构建产物里
+          # 没有 `Timestamp=`）。需要联网向 Apple 的时间戳服务取。
+          OTHER_CODE_SIGN_FLAGS: "--timestamp"
 
   MacBleUnlockTests:
     type: bundle.unit-test

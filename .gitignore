@@ -5,6 +5,7 @@ Resources/Info.plist
 # Xcode
 DerivedData/
 build/
+dist/
 *.xcuserstate
 xcuserdata/
 *.xcscmblueprint

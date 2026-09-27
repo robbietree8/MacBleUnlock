@@ -294,6 +294,8 @@ final class AppState {
         syncEngineState()
         handle(events: events)
         refreshAccessibilityTrust()
+        // 显示器电源状态每秒对齐一次：通知流在「启动时已经睡着」的情况下是错的。
+        screen.refreshDisplayPower()
         refreshMenuSnapshot()
     }
 

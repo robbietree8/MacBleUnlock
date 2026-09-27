@@ -377,11 +377,59 @@ auth.accessibility trusted=false cdhash=… team=55L6785UNH context=launch path=
 方向是不对称的：**漏判只是不解锁（安全），误判会把密码打进前台应用（不可接受）**。
 `Tests/LockEvidenceTests.swift` 把 8 种组合都钉住了，包括「只有前台是锁屏 UI」不算通过。
 
+### 锁屏注入：真实键码 + 先把登录界面叫醒
+
+注入链的每一步都有日志：`unlock.wake settledMs=…` → `unlock.trigger attempt=…` →
+`unlock.type chars=… mapped=… unicodeFallback=…` → `unlock.success` / `unlock.failed`。
+
+**一、用真实键码，不用 unicode 字符串。**
+按当前键盘布局现场建「字符 → 键码 + 修饰键」表（`KeyboardLayoutMap`：`UCKeyTranslate`
+扫 0…127 键码 × 无 / shift / option / shift+option），逐个发真实 keyDown/keyUp；
+布局打不出来的字符才退回 unicode 注入。实测 `unlock.type chars=14 mapped=14
+unicodeFallback=0 mapSize=200`。
+
+> 更正：早先版本的本节曾把「`authd` 里没有认证尝试」当作 unicode 注入无效的证据。
+> 那条**站不住**：密码正确解锁时 `authd` 也不落同样的记录。真实失败原因是下面两条；
+> unicode 注入在锁屏上的行为**没有单独验证过**，它现在只是布局打不出字符时的退路。
+
+**二、显示器要醒着，判据用电源层的事实。**
+`ScreenStateMonitor.displayAsleep` 原只由 `NSWorkspace.screensDidWake/Sleep` 通知维护，
+进程启动时不知道当下状态 —— App 在显示器已睡时启动就一直是 false，唤醒步骤被跳过，
+按键全打进黑屏（实测：`display.asleep` 通知比那次注入晚 130ms 到）。现在
+`CGDisplayIsAsleep(CGMainDisplayID())` 每秒对齐一次，解锁前直接问它。
+
+**三、登录窗口的「认证窗口」会自己关掉。**
+锁屏或唤醒后约 5s，登录窗口的 idle 计时器到期就关掉认证窗口：
+
+```
+07:24:12.487 -[LWDefaultScreenLockUI handleTimeOutTimer:] | idletime hit making further …
+07:24:12.490 -[LWDefaultScreenLockUI closeAuthAndReset:] | entered, resetAuthWindowLevel…
+```
+
+这之后注入的按键全部落空（实测那一轮三次尝试全废）。所以每次尝试前都：
+
+1. `IOPMAssertionDeclareUserActivity` 唤醒显示器，轮询 `CGDisplayIsAsleep` 等它真的醒，
+   再等 1s 让界面稳定（唤醒时系统会清空密码框：`loginwindow: Clearing password field for
+   NSWorkspaceScreensDidWakeNotification`）；
+2. 鼠标微移 2px：HID 层的用户活动，把密码框重新叫出来（锁屏不显示光标，也不用点击）；
+3. 鼠标轻推之后才投票、清空残留（3 个退格）、注入。
+
+实测三种场景都是第一次尝试成功（锁屏后重启 App 制造一次 `arrived` 迁移）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 刚锁屏 4s（认证窗口还开着） | `unlock.success`，≈1.4s |
+| 锁屏 12s + 显示器已睡 | `unlock.wake settledMs=1065` → 成功 |
+| 锁屏 14s + `caffeinate -d` 强制保持显示器唤醒 | 成功（靠鼠标轻推） |
+
+日志只记数量不记内容。
+
 ## 未验证项
 
-- **自动解锁端到端**没有在真机上跑通：需要给 App 授予辅助功能权限，并且要有一次真实的锁屏。
-  已单独验证的部分：三信号投票规则（单测）、Keychain 往返、`SACLockScreenImmediate`
-  可解析、密码注入的 `CGEvent` 序列。
+- **自动解锁端到端**已验证（2026-09-28）：三种锁屏场景各跑一次都成功（见「锁屏注入」一节），
+  解锁仍由 `LockEvidence` 三方投票把守。
+  仍未验证：屏保状态下解锁、多显示器、以及 `unicodeFallback > 0` 的情形（当前布局打不出
+  密码里的字符时退回 unicode 注入，它在锁屏上是否有效没有单独验证）。
 - **菜单点击类交互**（各项设置的持久化、开机自启的勾选与回滚）没有实际点击验证过，
   只有代码级与日志级检查。
 - 只在 macOS 27.0 上验证过。上面所有依赖系统行为的结论都需要在其它版本上重新确认。

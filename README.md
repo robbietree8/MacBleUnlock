@@ -136,6 +136,14 @@ log stream --predicate 'subsystem == "com.robbietree.MacBleUnlock"' --level debu
 日志会写明原因：`unlock.skip no accessibility permission`、`unlock.skip no stored password`、
 或 `unlock.abort votes=… `（投票未通过时会附带三个信号的实际取值）。
 
+日志还会给出注入结果：`unlock.type chars=14 mapped=14 unicodeFallback=0`。
+`unicodeFallback` 不为 0 说明有字符在当前键盘布局（输入法）里敲不出来，那部分只能退回
+unicode 注入 —— 这条退路在锁屏上**未经验证**，别指望它能解锁。换个能打出这些字符的
+输入法（比如英文键盘）即可。
+
+解锁过程分三步，日志里各对应一行：`unlock.wake`（显示器醒 + 界面稳定）→
+`unlock.trigger`（三方投票通过）→ `unlock.type`（注入）。缺哪一行就是哪一步没过。
+
 **辅助功能权限：系统设置里明明开着，菜单却写「未授予」。**
 
 TCC 的授权是绑在**代码签名身份**上的。换过证书（比如从自签名换成 Developer ID）之后，

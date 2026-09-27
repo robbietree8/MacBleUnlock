@@ -19,6 +19,7 @@ final class UnlockTrigger {
 
     private let returnKey: CGKeyCode = 36  // kVK_Return
     private let escapeKey: CGKeyCode = 53  // kVK_Escape
+    private let deleteKey: CGKeyCode = 51  // kVK_Delete（退格）
 
     private var inFlight = false
 
@@ -59,13 +60,22 @@ final class UnlockTrigger {
             try? await Task.sleep(for: .milliseconds(500))
         }
 
-        if app.wakeDisplayEnabled {
-            app.display.wakeDisplay()
-            try? await Task.sleep(for: .milliseconds(300))
-        }
-
         for attemptIndex in 1...3 {
             guard app.presence, !app.manualLock else { return }
+
+            // 锁屏界面的键盘事件有个前提：显示器得醒着、界面得刚刚被「用户活动」叫醒。
+            // 实测锁屏超过 ~5s（登录窗口的 idle 计时器到期）后认证窗口会被关掉
+            // （`LWDefaultScreenLockUI handleTimeOutTimer: idletime hit … canceling`），
+            // 这时按键全部落空；唤醒与轻推必须在**每次**尝试前做，而不是只在开头做一次。
+            if !app.wakeDisplayEnabled {
+                if ScreenStateMonitor.isDisplayAsleep {
+                    Log.screen.notice("unlock.skip display asleep, wake disabled")
+                    return
+                }
+            } else {
+                await ensureDisplayAwake()
+                nudgeLockScreen()
+            }
 
             let evidence = lockEvidence()
             guard evidence.locked else {
@@ -74,6 +84,9 @@ final class UnlockTrigger {
             }
 
             Log.screen.notice("unlock.trigger attempt=\(attemptIndex, privacy: .public) \(evidence.detail, privacy: .public)")
+            // 先把可能残留的半截密码清掉（空框里退格是空操作），顺便让锁屏把密码框拉出来。
+            clearPasswordField()
+            try? await Task.sleep(for: .milliseconds(250))
             typePassword(password)
             postKey(returnKey)
 
@@ -100,10 +113,42 @@ final class UnlockTrigger {
     }
 
     /// 只发一个密码字符串和回车，不注入任何其他按键。
-    /// 用 `keyboardSetUnicodeString` 而不是逐个映射虚拟键码，避免键盘布局差异。
     private func typePassword(_ password: String) {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return }
-        for unit in Array(password.utf16) {
+        let map = KeyboardLayoutMap()
+        var mapped = 0
+        var fallback = 0
+
+        for character in password {
+            if let entry = map.entry(for: character) {
+                mapped += 1
+                postKeyCode(entry.keyCode, flags: entry.flags, source: source)
+            } else {
+                // 当前布局打不出这个字符：退回 unicode 注入（多数界面能用，锁屏未必）。
+                fallback += 1
+                postUnicode(character, source: source)
+            }
+        }
+        // 只记数量，绝不记密码本身。
+        Log.screen.notice("unlock.type chars=\(password.count, privacy: .public) mapped=\(mapped, privacy: .public) unicodeFallback=\(fallback, privacy: .public) mapSize=\(map.count, privacy: .public)")
+    }
+
+    private func postKey(_ key: CGKeyCode) {
+        guard let source = CGEventSource(stateID: .hidSystemState) else { return }
+        postKeyCode(key, flags: [], source: source)
+    }
+
+    /// 真实按键事件：锁屏的安全输入框只认这个。
+    private func postKeyCode(_ key: CGKeyCode, flags: CGEventFlags, source: CGEventSource) {
+            for isDown in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: isDown) else { continue }
+            event.flags = flags
+                event.post(tap: .cghidEventTap)
+        }
+    }
+
+    private func postUnicode(_ character: Character, source: CGEventSource) {
+        for unit in String(character).utf16 {
             var value = unit
             for isDown in [true, false] {
                 guard let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: isDown) else { continue }
@@ -113,9 +158,47 @@ final class UnlockTrigger {
         }
     }
 
-    private func postKey(_ key: CGKeyCode) {
+    /// 退格几下：清掉上一次尝试可能留在框里的字符，空框里是空操作。
+    private func clearPasswordField() {
         guard let source = CGEventSource(stateID: .hidSystemState) else { return }
-        CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true)?.post(tap: .cghidEventTap)
-        CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)?.post(tap: .cghidEventTap)
+        for _ in 0..<3 {
+            postKeyCode(deleteKey, flags: [], source: source)
+        }
+    }
+
+    /// 确保显示器醒着，并在唤醒后给登录界面 1s 稳定时间。
+    ///
+    /// 判据用 `CGDisplayIsAsleep()`（电源层的事实），不用 `AppState.screen.displayAsleep`
+    /// —— 后者是通知流，App 在显示器睡着时启动的话它一直是 false。
+    /// 唤醒后系统会**清空密码框**（`loginwindow: Clearing password field for
+    /// NSWorkspaceScreensDidWakeNotification`），紧接着打字会被丢掉。
+    private func ensureDisplayAwake() async {
+        let started = Date()
+        for _ in 1...3 {
+            if ScreenStateMonitor.isDisplayAsleep {
+                AppState.shared.display.wakeDisplay()
+                var waited = 0
+                while ScreenStateMonitor.isDisplayAsleep, waited < 2000 {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    waited += 100
+                }
+            }
+            try? await Task.sleep(for: .milliseconds(1000))
+            if !ScreenStateMonitor.isDisplayAsleep {
+                Log.screen.notice("unlock.wake settledMs=\(Int(Date().timeIntervalSince(started) * 1000), privacy: .public)")
+                return
+            }
+        }
+        Log.screen.error("unlock.wake display still asleep")
+    }
+
+    /// 鼠标微移两像素：这是 HID 层的「用户活动」，锁屏靠它把密码框重新拉出来。
+    /// 锁屏上不显示光标，也不会有副作用；绝不用点击（误点可能点到别的控件）。
+    private func nudgeLockScreen() {
+        guard let source = CGEventSource(stateID: .hidSystemState) else { return }
+        let current = CGEvent(source: nil)?.location ?? CGPoint(x: 400, y: 400)
+        CGEvent(mouseEventSource: source, mouseType: .mouseMoved,
+                mouseCursorPosition: CGPoint(x: current.x + 2, y: current.y + 2),
+                mouseButton: .left)?.post(tap: .cghidEventTap)
     }
 }

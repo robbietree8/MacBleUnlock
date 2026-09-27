@@ -1,0 +1,92 @@
+name: MacBleUnlock
+options:
+  bundleIdPrefix: com.robbietree
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "MacBleUnlock Dev"
+    CODE_SIGNING_REQUIRED: YES
+    CODE_SIGNING_ALLOWED: YES
+    ALWAYS_SEARCH_USER_PATHS: NO
+    CLANG_ENABLE_MODULES: YES
+    SWIFT_EMIT_LOC_STRINGS: NO
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  MacBleUnlock:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleDevelopmentRegion: en
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSUIElement: true
+        NSBluetoothAlwaysUsageDescription: MacBleUnlock 需要蓝牙来检测配对的设备距离。
+        NSHumanReadableCopyright: Copyright © 2026 robbietree. MIT License.
+    entitlements:
+      path: Resources/MacBleUnlock.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.robbietree.MacBleUnlock
+        PRODUCT_NAME: MacBleUnlock
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        COMBINE_HIDPI_IMAGES: YES
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+      configs:
+        # hardened runtime 只对发布产物开：公证（notarytool）强制要求它。
+        # 实测它**不会**妨碍 dlopen 私有框架 —— 库校验只针对非 Apple 签名的库，
+        # login.framework 是 Apple 签名的，SACLockScreenImmediate 照常解析。
+        #
+        # 但 Debug **必须**关掉：Xcode 16+ 的 Debug 会把代码放进单独的
+        # MacBleUnlock.debug.dylib，而自签名证书没有 Team ID，库校验无法判定
+        # 「同团队」，dyld 会拒绝加载它 —— 测试宿主直接崩在启动阶段。
+        # Release 是单二进制，没有可校验的外部库，所以不受影响。
+        Debug:
+          ENABLE_HARDENED_RUNTIME: NO
+        Release:
+          ENABLE_HARDENED_RUNTIME: YES
+          # 发布构建不应可被调试（get-task-allow 会允许 task_for_pid 附加）。
+          # Debug 保留，否则 XCTest 无法注入测试宿主。
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+
+  MacBleUnlockTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: MacBleUnlock
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.robbietree.MacBleUnlockTests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  MacBleUnlock:
+    build:
+      targets:
+        MacBleUnlock: all
+        MacBleUnlockTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - MacBleUnlockTests
+    archive:
+      config: Release

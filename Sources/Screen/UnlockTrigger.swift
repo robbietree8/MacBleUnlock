@@ -60,7 +60,9 @@ final class UnlockTrigger {
             try? await Task.sleep(for: .milliseconds(500))
         }
 
-        for attemptIndex in 1...3 {
+        // 5 次而不是 3 次：系统睡眠唤醒后，登录界面要好几秒才收键
+        // （实测唤醒后的前两次尝试都落空，第三次才成功），重试窗口拉长到 ~16s。
+        for attemptIndex in 1...5 {
             guard app.presence, !app.manualLock else { return }
 
             // 锁屏界面的键盘事件有个前提：显示器得醒着、界面得刚刚被「用户活动」叫醒。
@@ -86,7 +88,9 @@ final class UnlockTrigger {
             Log.screen.notice("unlock.trigger attempt=\(attemptIndex, privacy: .public) \(evidence.detail, privacy: .public)")
             // 先把可能残留的半截密码清掉（空框里退格是空操作），顺便让锁屏把密码框拉出来。
             clearPasswordField()
-            try? await Task.sleep(for: .milliseconds(250))
+            // 4 个退格的第一下就是「把密码框叫出来」（`LWDefaultScreenLockUI keyPressed:`
+            // → `showPasswordFieldMakingFirstResponder:`），等它把密码框真正拿到第一响应者。
+            try? await Task.sleep(for: .milliseconds(400))
             typePassword(password)
             postKey(returnKey)
 
@@ -100,7 +104,7 @@ final class UnlockTrigger {
             }
         }
 
-        Log.screen.error("unlock.failed after 3 attempts")
+        Log.screen.error("unlock.failed after 5 attempts")
     }
 
     /// 采集三个信号交给 `LockEvidence` 投票。判定规则与理由见 `LockEvidence`。
@@ -174,6 +178,11 @@ final class UnlockTrigger {
     /// NSWorkspaceScreensDidWakeNotification`），紧接着打字会被丢掉。
     private func ensureDisplayAwake() async {
         let started = Date()
+        // 刚从系统睡眠里醒来的话，多给登录界面 1.5s：实测这一段里注入的按键会被吞掉。
+        if let wakeAt = AppState.shared.screen.lastSystemWakeAt,
+           Date().timeIntervalSince1970 - wakeAt < 20 {
+            try? await Task.sleep(for: .milliseconds(1500))
+        }
         for _ in 1...3 {
             if ScreenStateMonitor.isDisplayAsleep {
                 AppState.shared.display.wakeDisplay()

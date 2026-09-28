@@ -424,6 +424,28 @@ unicodeFallback=0 mapSize=200`。
 
 日志只记数量不记内容。
 
+### 系统睡眠：App 唤不醒它，但靠近时也不会睡
+
+- 用户态 App **无法**把 Mac 从系统睡眠里唤醒：唤醒源只有真实硬件输入（键盘 / 鼠标 / 开盖 /
+  电源键）与计划唤醒（`pmset schedule`，需 root）。`IOPMAssertionDeclareUserActivity` 只能
+  阻止空闲睡眠、点亮屏幕，对已经睡下去的系统无效。
+- 但「靠近时保持屏幕不休眠」开着时，系统本来就不会空闲睡眠：
+  `pmset -g assertions` 里能看到 powerd 自己持有
+  `PreventUserIdleSystemSleep named: "Powerd - Prevent sleep while display is on"`，
+  而我们的 `PreventUserIdleDisplaySleep` 让显示器不灭，链条因此成立：
+  设备在附近 → 显示器不灭 → powerd 阻止空闲系统睡眠。
+  （实测：设备在附近期间 `pmset -g log` 没有新的 `Entering Sleep`。）
+- 真正的睡眠只剩三种：带着手机离开（断言释放）、手动睡眠、合盖 —— 后两者任何 App 都拦不住。
+- 唤醒之后登录界面要几秒才收键：实测系统唤醒后的前两次注入落空、第三次才成功。所以重试从
+  3 次提到 5 次（约 16s），且距 `system.didWake` 20s 内的尝试额外等 1.5s。
+- 另外修了一个断言泄漏：`IOPMAssertionDeclareUserActivity` 每次传 `0` 都会新建一条
+  UserIsActive 断言（几分钟超时），旧代码每次解锁尝试都新建一条，`pmset -g assertions`
+  里堆了两条。现在复用同一个 id。
+
+> `unlock.success` 的判定是「投票说已经不在锁屏了」，它**分不清**是 App 注入成功还是用户自己
+> 敲的密码 / 触控 ID。要看注入是否真的有效，得看「尝试次数 + 时间」：例如刚锁屏、无人操作时
+> `attempt=1` 就 `success`（约 1s）才能归功于注入。
+
 ## 未验证项
 
 - **自动解锁端到端**已验证（2026-09-28）：三种锁屏场景各跑一次都成功（见「锁屏注入」一节），

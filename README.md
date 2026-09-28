@@ -17,7 +17,7 @@
 | 完全失去广播 30s | 判定离开并锁屏 |
 | 锁屏后 平滑 RSSI ≥ 靠近阈值（默认 -60） | 3s 内自动解锁 |
 | 菜单「立即锁定」 | 锁屏；必须等设备**先离开再靠近**才会自动解锁 |
-| 设备在附近 | 持有 `PreventUserIdleDisplaySleep`，屏幕不会因空闲熄灭 |
+| 设备在附近 | 持有 `PreventUserIdleDisplaySleep`，屏幕不会因空闲熄灭（连带系统也不会空闲睡眠）|
 | 设备不在附近 / App 未运行 / 未设置密码 | 锁屏仍能用密码正常解锁 |
 
 ## 安装
@@ -179,6 +179,20 @@ log show --predicate 'subsystem == "com.robbietree.MacBleUnlock"' --last 5m | gr
 （历史上它曾把主线程卡死在系统授权框上：BLE 不启动、菜单不动），读不出来时菜单会写
 「设置登录密码…（旧条目不可读）」并多出「删除旧钥匙串条目」。重设一次密码即可 ——
 同证书重新构建不会再弹框（访问控制绑的是指定要求，不是 cdhash）。
+
+**Mac 睡下去了，回来时解锁不了。**
+
+先说物理限制：**用户态 App 无法把 Mac 从系统睡眠里唤醒** —— 唤醒源只有真实硬件输入
+（敲键盘 / 动鼠标 / 开盖 / 按电源键）和计划唤醒（`pmset schedule`，需 root）。
+`IOPMAssertionDeclareUserActivity` 只能阻止空闲睡眠、点亮屏幕，对已经睡下去的系统无效。
+
+但「靠近时保持屏幕不休眠」开着时，**设备在附近期间系统不会空闲睡眠**：我们的断言让显示器不灭，
+而 powerd 在显示器亮着时会自己持有 `Prevent sleep while display is on`（`pmset -g assertions`
+里能看到）。真正的睡眠只剩三种：带着手机离开（断言释放）→ 系统空闲睡眠；手动点睡眠；合盖 ——
+后两种任何 App 都拦不住。
+
+如果你是自己手动唤醒的（开盖 / 按键），App 会在唤醒后重试：登录界面要好几秒才收键，
+所以现在最多试 5 次（约 16s），日志看 `unlock.trigger attempt=N` 与 `unlock.failed after 5 attempts`。
 
 ## 分发
 

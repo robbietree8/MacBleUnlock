@@ -7,6 +7,7 @@ import IOKit.pwr_mgt
 @MainActor
 final class DisplayPower {
     private var keepAwakeAssertion: IOPMAssertionID = 0
+    private var userActivityAssertion: IOPMAssertionID = 0
 
     /// 设备在附近时持有 `PreventUserIdleDisplaySleep`。重复调用幂等。
     func holdKeepAwake() {
@@ -36,11 +37,13 @@ final class DisplayPower {
 
     /// 点亮屏幕（但不解锁）。锁屏状态下由 loginwindow 决定是否显示密码框。
     func wakeDisplay() {
-        var id: IOPMAssertionID = 0
+        // **复用**同一个断言 id：`IOPMAssertionDeclareUserActivity` 每次传 0 都会新建一条
+        // UserIsActive 断言，而它有几分钟的超时 —— 旧代码每次解锁尝试都新建一条，
+        // `pmset -g assertions` 里会堆出一串同名断言（实测 2 条同时存活）。
         let result = IOPMAssertionDeclareUserActivity(
             "MacBleUnlock" as CFString,
             kIOPMUserActiveLocal,
-            &id
+            &userActivityAssertion
         )
         if result == kIOReturnSuccess {
             Log.screen.notice("wakeDisplay ok")

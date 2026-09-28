@@ -18,6 +18,8 @@ final class ScreenStateMonitor {
     private(set) var inScreensaver = false
     /// 进入锁定状态的时刻；用于「必须已锁定足够久才注入回车」的判定。
     private(set) var lockedSince: TimeInterval?
+    /// 上一次系统从睡眠中醒来的时刻。唤醒后的登录界面需要更长时间才就绪。
+    private(set) var lastSystemWakeAt: TimeInterval?
 
     /// 向 CoreGraphics 问一次显示器的真实电源状态。
     ///
@@ -92,6 +94,7 @@ final class ScreenStateMonitor {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.systemAsleep = false
+                self.lastSystemWakeAt = Date().timeIntervalSince1970
                 Log.screen.notice("system.didWake")
                 // 唤醒后 1s 重新对账：睡眠期间可能错过了分布式通知。
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in

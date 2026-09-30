@@ -291,6 +291,45 @@ scripts/release.sh: line 138: SUBMISSION<替换字符>: unbound variable
 二进制在 dyld 共享缓存里，`dlopen` 照常解析（见上面的探针）。所以
 `codesign -dvvv` 那个路径会失败（No such file），别拿它判断私有 API 还在不在。
 
+## 检查更新：直接读 GitHub Releases
+
+### 为什么不上 Sparkle
+
+Sparkle 要额外依赖、自建 appcast（还得单独托管 + 签名），而这个项目的安装包本来就只发在
+GitHub Release（`scripts/release.sh` 传 `dist/` 的 dmg / zip），所以直接读官方 API：
+`GET /repos/robbietree8/MacBleUnlock/releases/latest`。
+
+- 该端点本身就不含 draft 与 prerelease，不用客户端再过滤；
+- 未认证限额 60 次/小时/IP：只在用户点菜单时发一次请求，不轮询、不缓存、不自动下载；
+- 没引任何新依赖，就一个 `URLSession`。
+
+### 版本号比较不能按字符串
+
+`1.0.10` > `1.0.9`，字符串字典序会给反的。`UpdateChecker.isNewer` 按 `.` 分段比数字，
+短的一侧补 0（`1.1` > `1.0.9`），`v` 前缀与预发布 / build 后缀整个丢掉。
+
+截断必须**先整体截断再分段**：一开始写成「每段取前导数字」，`1.0.2-beta.1` 会得出
+`[1, 0, 2, 1]` —— `beta.1` 又多出一个段，于是同号预发布被判成新版。这条是单测
+（`Tests/UpdateCheckerTests.swift`）先红后绿的，现在只取开头连续的 `数字.数字` 再分段。
+
+### 下载与安装的分工
+
+- 资产命名约定 `MacBleUnlock-<version>.dmg` / `.zip`（与 `release.sh` 一致），优先取 dmg；
+  两个都没有就只留「打开发布页」。
+- 落到 `~/Downloads`，**同名不覆盖**（存成 `名字 2.dmg`，不删用户已有的文件），
+  下载完在 Finder 里选中；**不自动安装、不自动替换 `/Applications` 里正在跑的自己**。
+- 超时给了 300s：实测本机网络下载这 1.7MB 用了 **43.9s**，默认的 60s 会不够。
+
+### 实测（2026-09-30，单测宿主里跑真网络，跑完即删）
+
+- `check(current: "1.0.2")` → `upToDate`；`check(current: "1.0.1")` → `available`，
+  `version=1.0.2`、`asset=MacBleUnlock-1.0.2.dmg`、pageURL 指向 `releases/tag/v1.0.2`。
+- 真下载落地 1691602 字节，与 API 报的 asset size 一致。
+- 下载到的 dmg：`hdiutil imageinfo` → UDZO；挂载后 `spctl -a -t exec -vv` →
+  `accepted / source=Notarized Developer ID`。即「检查更新 → 下载 → 双击挂载」这条链路
+  拿到的确实是 Gatekeeper 放行的包。
+- Release 里没有 dmg / zip 时 `download` 抛 `.noAsset`，菜单会退成「打开发布页」。
+
 ## 图标
 
 `Resources/AppIcon.icns` 是生成物，由 `scripts/make-icon.swift` 用 CoreGraphics 矢量重画
@@ -463,6 +502,12 @@ unicodeFallback=0 mapSize=200`。
   解锁仍由 `LockEvidence` 三方投票把守。
   仍未验证：屏保状态下解锁、多显示器、以及 `unicodeFallback > 0` 的情形（当前布局打不出
   密码里的字符时退回 unicode 注入，它在锁屏上是否有效没有单独验证）。
-- **菜单点击类交互**（各项设置的持久化、开机自启的勾选与回滚）没有实际点击验证过，
-  只有代码级与日志级检查。
+- **睡眠 → 手动唤醒后的自动解锁**（`unlock.wait` / `unlock.retry after system wake`）
+  只做了代码级与日志级推导（见「系统睡眠」一节）：实机复现需要真的一次系统睡眠再接硬件唤醒，
+  没法在开发机上脚本触发。下次合盖后回来请直接看日志里这三个标记。
+- **菜单点击类交互**（各项设置的持久化、开机自启的勾选与回滚、「检查更新」的检查 / 下载 /
+  打开发布页）没有实际点击验证过，只有代码级、日志级检查。菜单栏自动化在本机拿不到：
+  `orca computer capabilities` 报 `surfaces.menubar: false`，终端也没有辅助功能授权
+  （`osascript` 读 System Events 报 -1719）。「检查更新」的代码路径本身已在单测宿主里
+  连真网络跑通（见「检查更新」一节）。
 - 只在 macOS 27.0 上验证过。上面所有依赖系统行为的结论都需要在其它版本上重新确认。

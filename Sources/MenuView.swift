@@ -73,9 +73,18 @@ struct MenuView: View {
 
         Button("打开日志") { app.openLog() }
 
+        Button(updateItemTitle) { app.performUpdateAction() }
+            .disabled(app.updateState.isBusy)
+
+        if app.updateState.knownRelease != nil {
+            Button("打开发布页") { app.openReleasePage() }
+        }
+
         Divider()
 
         Text("设备在附近时，App 会自动替你输入登录密码解锁。")
+
+        Text(versionText)
 
         Button("退出 MacBleUnlock") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
@@ -83,6 +92,42 @@ struct MenuView: View {
 
     private var accessibilityTitle: String {
         app.accessibilityTrusted ? "辅助功能权限：已授予" : "辅助功能权限：未授予（点击申请）"
+    }
+
+    /// 检查更新那一项的标题 —— 状态与动作都要写在标题里，菜单里没有别的提示位置：
+    /// `.menu` 样式只能给 Button 一个标题，disable 一项就少一个可点击入口，
+    /// 所以主按钮的事（检查 / 下载 / 显示）由 `AppState.performUpdateAction()` 按状态分派。
+    private var updateItemTitle: String {
+        switch app.updateState {
+        case .idle:
+            "检查更新"
+        case .checking:
+            "正在检查更新…"
+        case .upToDate(let version):
+            "已是最新版本 \(version)（点击重新检查）"
+        case .available(let release):
+            release.downloadURL == nil
+                ? "发现新版本 \(release.version)（无安装包，打开发布页）"
+                : "下载 MacBleUnlock \(release.version) 安装包"
+        case .downloading(let release):
+            "正在下载 \(release.version)…"
+        case .downloaded(_, let url):
+            "已下载 \(url.lastPathComponent)（点击在 Finder 中显示）"
+        case .failed(let reason):
+            "检查更新失败：\(reason)（点击重试）"
+        }
+    }
+
+    /// 菜单底部显示的版本号。
+    ///
+    /// 直接读 `Bundle.main`，不缓存：`.menu` 样式的菜单内容每次打开都重建，
+    /// 所以从 Finder 里替换 `.app` 后不用重启菜单就能看到新版本。
+    /// 版本号来自 `project.yml` 的 `CFBundleShortVersionString` / `CFBundleVersion`。
+    private var versionText: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "版本 \(short) (\(build))"
     }
 
     /// 换过签名证书后，钥匙串里属于旧身份的条目会读不出来（历史上它还会把 App 卡在启动阶段）。

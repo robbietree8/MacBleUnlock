@@ -7,4 +7,5 @@ enum Log {
     static let ble = Logger(subsystem: subsystem, category: "ble")
     static let proximity = Logger(subsystem: subsystem, category: "proximity")
     static let screen = Logger(subsystem: subsystem, category: "screen")
+    static let update = Logger(subsystem: subsystem, category: "update")
 }

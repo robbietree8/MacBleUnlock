@@ -46,6 +46,40 @@ final class AppState {
     /// 菜单「立即锁定」置位；必须等设备先离开再靠近才恢复自动解锁。
     private(set) var manualLock = false
 
+    // MARK: - 检查更新
+
+    /// 一次检查/下载的可见状态。只在用户点菜单时变，所以菜单可以直接观察它。
+    enum UpdateState: Equatable {
+        case idle
+        case checking
+        case upToDate(String)
+        case available(UpdateChecker.Release)
+        case downloading(UpdateChecker.Release)
+        /// 已落到下载文件夹的安装包：release + 落地路径。
+        case downloaded(UpdateChecker.Release, URL)
+        /// 失败原因（一句话，直接进菜单）。
+        case failed(String)
+
+        /// 请求进行中：菜单项置灰，避免连点攒出一堆请求。
+        var isBusy: Bool {
+            switch self {
+            case .checking, .downloading: true
+            default: false
+            }
+        }
+
+        /// 已经知道的新版本（有安装包或已经下载完），「打开发布页」据此显示。
+        var knownRelease: UpdateChecker.Release? {
+            switch self {
+            case .available(let release), .downloading(let release), .downloaded(let release, _): release
+            default: nil
+            }
+        }
+    }
+
+    private(set) var updateState: UpdateState = .idle
+    @ObservationIgnored private var updateTask: Task<Void, Never>?
+
     // MARK: - 设置
 
     var unlockRSSI: Int = -60 { didSet { persist(unlockRSSI, Key.unlockRSSI); applyConfig() } }
@@ -119,6 +153,9 @@ final class AppState {
         tickTask = nil
         scanner.stop()
         screen.stop()
+        screen.onSystemWake = nil
+        updateTask?.cancel()
+        updateTask = nil
         for observer in menuTrackingObservers { NotificationCenter.default.removeObserver(observer) }
         menuTrackingObservers.removeAll()
         display.releaseKeepAwake()
@@ -224,6 +261,72 @@ final class AppState {
         NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Console.app"))
     }
 
+    // MARK: - 检查更新
+
+    /// 菜单主按钮：点下去干什么由当前状态决定（检查 / 下载 / 在 Finder 里显示已下载的包）。
+    func performUpdateAction() {
+        switch updateState {
+        case .idle, .upToDate, .failed: checkForUpdates()
+        case .available(let release):
+            // 没带安装包的 release（只有源码包）就只能去发布页。
+            if release.downloadURL == nil { openReleasePage() } else { downloadUpdate() }
+        case .downloaded(_, let url): NSWorkspace.shared.activateFileViewerSelecting([url])
+        case .checking, .downloading: break  // 请求进行中，菜单项已置灰
+        }
+    }
+
+    /// 查 GitHub Releases 的最新 tag 并与当前版本比对。
+    /// 不做自动轮询、不缓存结果：一次点击一次请求（未认证限额 60 次/小时/IP）。
+    func checkForUpdates() {
+        updateTask?.cancel()
+        updateState = .checking
+        let current = UpdateChecker.currentVersion
+        Log.update.notice("update.check current=\(current, privacy: .public)")
+        updateTask = Task { [weak self] in
+            let result = await UpdateChecker.check(current: current)
+            guard let self, !Task.isCancelled else { return }
+            switch result {
+            case .upToDate(let version):
+                self.updateState = .upToDate(version)
+                Log.update.notice("update.result upToDate version=\(version, privacy: .public)")
+            case .available(let version, let release):
+                self.updateState = .available(release)
+                Log.update.notice("update.result available current=\(version, privacy: .public) latest=\(release.version, privacy: .public) asset=\(release.downloadName ?? "-", privacy: .public)")
+            case .failed(let reason):
+                self.updateState = .failed(reason)
+                Log.update.error("update.result failed reason=\(reason, privacy: .public)")
+            }
+        }
+    }
+
+    /// 把安装包下到 `~/Downloads` 并在 Finder 里选中。
+    func downloadUpdate() {
+        guard let release = updateState.knownRelease, release.downloadURL != nil else { return }
+        updateTask?.cancel()
+        updateState = .downloading(release)
+        Log.update.notice("update.download start version=\(release.version, privacy: .public) name=\(release.downloadName ?? "-", privacy: .public)")
+        updateTask = Task { [weak self] in
+            do {
+                let url = try await UpdateChecker.download(release)
+                guard let self, !Task.isCancelled else { return }
+                self.updateState = .downloaded(release, url)
+                Log.update.notice("update.downloaded path=\(url.path, privacy: .public)")
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                let reason = (error as? LocalizedError)?.errorDescription ?? "下载失败"
+                self.updateState = .failed(reason)
+                Log.update.error("update.download failed reason=\(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    /// 用浏览器打开发布页 —— 想看 release notes 或自己挑包（zip）时用。
+    func openReleasePage() {
+        guard let release = updateState.knownRelease else { return }
+        Log.update.notice("update.page opened version=\(release.version, privacy: .public)")
+        NSWorkspace.shared.open(release.pageURL)
+    }
 
     func selectDevice(_ device: DeviceSample) {
         monitoredUUID = device.uuid

@@ -62,6 +62,22 @@ open -a /Applications/MacBleUnlock.app
 | 设置 / 更新 / 清除登录密码 | 密码只存本机钥匙串 |
 | 立即锁定 | 手动锁屏；之后必须「先离开再靠近」才会自动解锁 |
 | 打开日志 | 把日志过滤条件复制到剪贴板并打开控制台 |
+| 检查更新 | 读 GitHub Releases 的最新 tag 与当前版本比对：已是最新 / 发现新版后一键把 dmg 下到「下载」并在 Finder 中选中 / 打开发布页。失败时显示原因（如「网络不可用」「HTTP 403」），点一下重试 |
+| 版本 | 菜单底部显示 `版本 1.0.2 (1)`，直接读当前运行的 `.app` 的 `CFBundleShortVersionString` / `CFBundleVersion`（源头是 `project.yml`），不缓存 |
+
+### 「检查更新」怎么工作
+
+安装包只发在 GitHub Release 里（`scripts/release.sh` 把 `dist/` 的 dmg / zip 传上去），所以
+不引 Sparkle（要额外依赖、自建 appcast、还得托管签名），只做三件事：
+
+1. `GET https://api.github.com/repos/robbietree8/MacBleUnlock/releases/latest` —— 这个端点本身
+   就不含 draft 与 prerelease；未认证 60 次/小时/IP，一次点击一次请求，不轮询、不缓存、不自动下载；
+2. 比版本号：按 `.` 分段比数字（`1.0.10` > `1.0.9`），忽略 `v` 前缀与预发布后缀；
+3. 有新版就把 `.dmg`（没有就 `.zip`）下到「下载」文件夹并在 Finder 里选中，**不自动安装、
+   不覆盖已有 App**；同名文件已存在就存成 `名字 2.dmg`，不删你已有的文件。
+
+下载到的 dmg 是已公证的（`spctl -a -t exec -vv` → `accepted / source=Notarized Developer ID`），
+双击挂载后把 App 拖进「应用程序」替换即可，不需要再手动放行。发布页里也有 zip 版本。
 
 ## 自动解锁是怎么工作的
 

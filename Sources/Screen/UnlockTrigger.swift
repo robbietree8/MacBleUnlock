@@ -17,6 +17,9 @@ import Foundation
 final class UnlockTrigger {
     static let shared = UnlockTrigger()
 
+    /// 等系统真正醒来的上限。实测 `system.didWake` 比显示器点亮晚约 10s。
+    private static let wakeWaitSeconds: TimeInterval = 30
+
     private let returnKey: CGKeyCode = 36  // kVK_Return
     private let escapeKey: CGKeyCode = 53  // kVK_Escape
     private let deleteKey: CGKeyCode = 51  // kVK_Delete（退格）
@@ -38,7 +41,14 @@ final class UnlockTrigger {
         let app = AppState.shared
 
         guard app.presence, app.autoUnlockEnabled, !app.manualLock else { return }
-        guard !app.screen.systemAsleep else { return }
+        // 系统睡眠里注入按键没有意义（powerd 会把事件丢掉），但**不能直接放弃**：
+        // 用户开盖 / 按键点亮显示器后，`system.didWake` 还要约 10s 才到，而 BLE 扫描一恢复
+        // 就可能在这段窗口里报出「靠近」。实测 2026-09-30 08:37：`arrived` 比 `didWake` 早 8.7s，
+        // 那一次注入被这里静默丢掉，之后不会再有任何 `.arrived`，于是一整天都没解锁。
+        if app.screen.systemAsleep, await !waitForSystemAwake() {
+            Log.screen.error("unlock.skip system still asleep after \(Self.wakeWaitSeconds, privacy: .public)s")
+            return
+        }
         guard Permissions.isAccessibilityTrusted else {
             Log.screen.notice("unlock.skip no accessibility permission")
             return
@@ -114,6 +124,22 @@ final class UnlockTrigger {
             sessionLocked: ScreenStateMonitor.currentSessionLocked(),
             frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         )
+    }
+
+    /// 有界等待系统从睡眠中醒来，返回是否等到了。
+    ///
+    /// 只能等、不能问：macOS 没有公开的「当前是否处于系统睡眠」查询，事实来源就是
+    /// `NSWorkspace.didWakeNotification`，而它比显示器点亮晚约 10s（见调用点的实测）。
+    /// 等到了就继续走下面那套「唤醒后多给登录界面 1.5s」的流程（`lastSystemWakeAt` 此时刚被写入）。
+    private func waitForSystemAwake() async -> Bool {
+        Log.screen.notice("unlock.wait systemAsleep timeout=\(Int(Self.wakeWaitSeconds), privacy: .public)s")
+        let deadline = Date().addingTimeInterval(Self.wakeWaitSeconds)
+        while AppState.shared.screen.systemAsleep, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        guard !AppState.shared.screen.systemAsleep else { return false }
+        Log.screen.notice("unlock.wait system awake")
+        return true
     }
 
     /// 只发一个密码字符串和回车，不注入任何其他按键。

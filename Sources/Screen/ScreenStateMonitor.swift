@@ -21,6 +21,11 @@ final class ScreenStateMonitor {
     /// 上一次系统从睡眠中醒来的时刻。唤醒后的登录界面需要更长时间才就绪。
     private(set) var lastSystemWakeAt: TimeInterval?
 
+    /// 系统从睡眠里醒来时立刻回调。`AppState` 用它补一次「落在唤醒窗口里的靠近事件」的解锁尝试：
+    /// 那次 `arrived` 会被 `UnlockTrigger` 的 `systemAsleep` 判据挡在门外，而唤醒之后
+    /// 不会再有新的 `.arrived`（设备一直在附近时 presence 也不会重置），只能在这里补。
+    var onSystemWake: (@MainActor () -> Void)?
+
     /// 向 CoreGraphics 问一次显示器的真实电源状态。
     ///
     /// 不能只靠 `NSWorkspace.screensDidWake/Sleep` 通知：那是个**事件流**，进程启动时并不
@@ -96,6 +101,7 @@ final class ScreenStateMonitor {
                 self.systemAsleep = false
                 self.lastSystemWakeAt = Date().timeIntervalSince1970
                 Log.screen.notice("system.didWake")
+                self.onSystemWake?()
                 // 唤醒后 1s 重新对账：睡眠期间可能错过了分布式通知。
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                     MainActor.assumeIsolated { self?.reconcileLockState(reason: "didWake") }

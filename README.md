@@ -194,6 +194,16 @@ log show --predicate 'subsystem == "com.robbietree.MacBleUnlock"' --last 5m | gr
 如果你是自己手动唤醒的（开盖 / 按键），App 会在唤醒后重试：登录界面要好几秒才收键，
 所以现在最多试 5 次（约 16s），日志看 `unlock.trigger attempt=N` 与 `unlock.failed after 5 attempts`。
 
+注意「显示器点亮」和「系统醒来」不是一回事：实测 `system.didWake` 比显示器点亮晚约 9s，
+而 BLE 扫描一恢复就会在这段窗口里报出「靠近」。这段窗口里的解锁尝试以前会被静默丢掉
+（`systemAsleep` 还是 true），所以现在还做了两件事：
+
+- 那次尝试会**有界地等**系统真正醒来再继续（`unlock.wait systemAsleep` → `unlock.wait system awake`，
+  上限 30s；等不到就 `unlock.skip system still asleep after 30s` 放弃）；
+- `system.didWake` 时如果设备已在附近且屏幕仍然锁着，再**补一次**尝试
+  （`unlock.retry after system wake`）—— 设备一直在旁边的话连 `arrived` 都不会有，
+  只能靠这一枪。
+
 ## 分发
 
 ### 自签名构建只能自己用

@@ -441,6 +441,17 @@ unicodeFallback=0 mapSize=200`。
 - 另外修了一个断言泄漏：`IOPMAssertionDeclareUserActivity` 每次传 `0` 都会新建一条
   UserIsActive 断言（几分钟超时），旧代码每次解锁尝试都新建一条，`pmset -g assertions`
   里堆了两条。现在复用同一个 id。
+- **唤醒窗口里的「靠近」事件会被静默丢掉**（2026-09-30 实测，当天一整天没自动解锁）：
+  系统睡眠期间 BLE 扫描停摆，用户开盖 / 按键后事件顺序是
+  `display.awake` → （BLE 恢复）`proximity event=arrived` → `system.didWake`，
+  而 `UnlockTrigger` 开头的 `guard !app.screen.systemAsleep` 直接 `return`、**不打任何日志**，
+  于是那次唯一能触发解锁的 `arrived` 就没了 —— 之后不会再有 `.arrived`，除非人离开再回来。
+  当天日志：`08:37:08 display.awake` → `08:37:09.783 arrived` → `08:37:18.013 system.didWake`
+  （差 8.7s）→ `08:37:38 locked=false`（用户自己敲的密码）。中间没有任何 `unlock.*` 日志。
+  现在：① 这个判据不再直接放弃，而是有界等系统醒来（`unlock.wait systemAsleep`，上限 30s）；
+  ② `ScreenStateMonitor` 在 `didWake` 时回调 `AppState.retryUnlockAfterWake()` 补一枪
+  （设备一直在附近时连 `arrived` 都没有，只能这样补），日志标记 `unlock.retry after system wake`。
+  这条路径是实机待验证的：需要真的一次「睡眠 → 手动唤醒」。
 
 > `unlock.success` 的判定是「投票说已经不在锁屏了」，它**分不清**是 App 注入成功还是用户自己
 > 敲的密码 / 触控 ID。要看注入是否真的有效，得看「尝试次数 + 时间」：例如刚锁屏、无人操作时

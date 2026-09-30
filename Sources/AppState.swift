@@ -84,6 +84,10 @@ final class AppState {
         applyConfig()
 
         screen.start()
+        // 唤醒窗口里到达的「靠近」事件：`UnlockTrigger` 那次会先等系统醒来（`unlock.wait`），
+        // 但设备本来就在附近时连 `arrived` 都不会有（睡眠期间扫描停摆，醒来后 presence 仍为 true），
+        // 所以 `didWake` 时再主动补一次。
+        screen.onSystemWake = { [weak self] in self?.retryUnlockAfterWake() }
         refreshPasswordStatus()
         refreshAccessibilityTrust(logAlways: true)
         startMenuTrackingObservation()
@@ -410,6 +414,18 @@ final class AppState {
         case .departed: "设备远离"
         case .lost: "信号丢失"
         }
+    }
+
+    /// 系统从睡眠中醒来后补一次解锁尝试。
+    ///
+    /// 两个入口都需要它：唤醒窗口里到达的 `arrived`（`UnlockTrigger` 会等系统醒来，但多一次总无妨），
+    /// 以及「设备一直在附近、睡眠期间扫描停摆」那种连 `arrived` 都不会有的唤醒 ——
+    /// 实测 2026-09-30 08:37 就是前者：`arrived` 到 `system.didWake` 的 8.7s 里什么都做不了。
+    private func retryUnlockAfterWake() {
+        guard presence, screen.isLocked, autoUnlockEnabled, !manualLock else { return }
+        Log.screen.notice("unlock.retry after system wake")
+        if wakeDisplayEnabled { display.wakeDisplay() }
+        UnlockTrigger.shared.attempt()
     }
 
     /// 设备在附近且开启「保持屏幕不休眠」时持有断言。

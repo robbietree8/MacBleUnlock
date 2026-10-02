@@ -45,6 +45,10 @@ struct MenuView: View {
         Toggle("靠近时保持屏幕不休眠", isOn: $app.keepAwakeEnabled)
         Toggle("靠近时唤醒屏幕", isOn: $app.wakeDisplayEnabled)
         Toggle("开机自启", isOn: $app.launchAtLoginEnabled)
+        Toggle("显示菜单栏图标", isOn: Binding(
+            get: { app.menuBarIconVisible },
+            set: { app.setMenuBarIconVisible($0) }
+        ))
 
         Divider()
 

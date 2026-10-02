@@ -58,6 +58,7 @@ open -a /Applications/MacBleUnlock.app
 | 靠近时保持屏幕不休眠 | 设备在附近时抑制屏幕空闲熄灭 |
 | 靠近时唤醒屏幕 | 解锁前先点亮屏幕 |
 | 开机自启 | 登录项 |
+| 显示菜单栏图标 | 默认勾选；关闭后菜单图标立即消失，App 转为 **纯后台**（无 Dock 图标 / 窗口 / 通知），自动锁定/解锁照常。选择跨重启保留 |
 | 辅助功能权限 | 显示状态；未授予时点击去申请 |
 | 设置 / 更新 / 清除登录密码 | 密码只存本机钥匙串 |
 | 立即锁定 | 手动锁屏；之后必须「先离开再靠近」才会自动解锁 |
@@ -78,6 +79,29 @@ open -a /Applications/MacBleUnlock.app
 
 下载到的 dmg 是已公证的（`spctl -a -t exec -vv` → `accepted / source=Notarized Developer ID`），
 双击挂载后把 App 拖进「应用程序」替换即可，不需要再手动放行。发布页里也有 zip 版本。
+
+### 隐藏菜单栏图标
+
+关闭「显示菜单栏图标」后，App 不退出：BLE 监测、自动锁定/解锁和「保持屏幕不休眠」断言
+全部继续运行，只是没有任何可见 UI（Dock 图标也没有 —— 它始终是 `LSUIElement` agent）。
+
+**恢复图标：重新打开这个已经在运行的 App。** 在 Finder / Launchpad / Spotlight 双击，
+或执行 `open -a MacBleUnlock`。LaunchServices 会把再次打开交给现有进程，由它把偏好改回
+显示并重新插入图标；不会重复启动后台扫描。
+
+**真想退出**：隐藏态没有菜单可用，用 Activity Monitor 结束 `MacBleUnlock`，或
+`pkill MacBleUnlock`。也可以先按上面的方式恢复图标，再从菜单选「退出 MacBleUnlock」。
+
+**冷启动仍然遵从已存偏好**：如果上次隐藏了图标，直接冷启动（包括登录时开机自启）
+仍是纯后台，不会自己把图标恢复回来。这是刻意的 —— LaunchServices 可能把冷启动的
+首次打开也投递到「再次打开」回调，所以启动完成前、以及启动后 1 秒内的打开请求一律忽略。
+因此**冷启动后想恢复图标，请等超过 1 秒再打开一次**。
+
+这条 1 秒窗口是否够用，先看 `app.reopen` 日志里的 `delta`
+（`log stream --predicate 'subsystem == "com.robbietree.MacBleUnlock"' --level debug`）——
+它记录每次打开事件距启动的秒数，事件被忽略也会留痕。真机上分别在「冷启动（含登录项启动）」
+「冷启动后 >1 秒再打开一次」「明显长时间运行后再次打开」三种场景各记几次 `delta`，
+若冷启动首次打开普遍远小于 1 秒，就说明现在这个窗口是够的。
 
 ## 自动解锁是怎么工作的
 
@@ -112,7 +136,7 @@ macOS 没有解锁 API，所以 App 的做法是**替你输入一次登录密码
 存在 `UserDefaults`（domain `com.robbietree.MacBleUnlock`）：
 
 `monitoredDeviceUUID`、`monitoredDeviceName`、`unlockRSSI`、`lockRSSI`、`lockDelay`、
-`noSignalTimeout`、`keepAwake`、`wakeDisplay`、`autoUnlock`、`autoLock`。
+`noSignalTimeout`、`keepAwake`、`wakeDisplay`、`autoUnlock`、`autoLock`、`menuBarIconVisible`。
 
 日志：
 

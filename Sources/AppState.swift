@@ -20,6 +20,7 @@ final class AppState {
         static let autoUnlock = "autoUnlock"
         static let autoLock = "autoLock"
         static let launchAtLogin = "launchAtLogin"
+        static let menuBarIconVisible = "menuBarIconVisible"
     }
 
     // MARK: - 子系统
@@ -91,6 +92,10 @@ final class AppState {
     var autoUnlockEnabled = true { didSet { persist(autoUnlockEnabled, Key.autoUnlock) } }
     var autoLockEnabled = true { didSet { persist(autoLockEnabled, Key.autoLock) } }
 
+    /// 菜单栏图标是否显示。隐藏态没有任何前台 UI（无 Dock 图标、窗口、通知），
+    /// 进程、BLE 扫描与自动锁定/解锁照常运行；只有重新打开已运行的 App 才会恢复。
+    var menuBarIconVisible = true { didSet { persist(menuBarIconVisible, Key.menuBarIconVisible) } }
+
     /// 开机自启：不缓存，直接反映 `SMAppService` 的真实状态。
     /// 写入失败时 `LoginItem.setEnabled` 返回 false，这里就不改任何本地状态 —— 菜单勾选自然回滚。
     /// `.menu` 样式的内容在每次打开菜单时重建，所以不需要额外的变更通知。
@@ -100,11 +105,27 @@ final class AppState {
     }
 
 
-    private var defaults: UserDefaults { .standard }
+    @ObservationIgnored private let defaults: UserDefaults
     private var tickTask: Task<Void, Never>?
     private var isApplyingStoredConfig = false
 
-    private init() {}
+    /// 可注入 `UserDefaults`，单测据此用独立 suite 构造互不影响的状态实例；
+    /// `AppState.shared` 仍走 `.standard`，生产行为不变。
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        // 构造时就加载：SwiftUI Scene 第一次构建 `MenuBarExtra(isInserted:)` 必须已经拿到
+        // 存储值，否则存了隐藏偏好的冷启动会先插进图标、再被 `start()` 覆盖而闪一下。
+        loadStoredSettings()
+    }
+
+    /// 菜单开关与 reopen 恢复共用这一个入口：只改偏好并持久化，绝不触碰正在运行的后台任务。
+    /// `MenuBarExtra` 没有「插入成功与否」的返回值，检测不到失败；若将来出现可检测的失败信号，
+    /// 回退策略是把偏好恢复为 true 并持久化，避免留下用户无法自救的隐藏状态。
+    func setMenuBarIconVisible(_ visible: Bool) {
+        guard menuBarIconVisible != visible else { return }
+        menuBarIconVisible = visible
+        Log.app.notice("menubar.icon visible=\(visible, privacy: .public)")
+    }
 
     // MARK: - 生命周期
 
@@ -569,6 +590,8 @@ final class AppState {
         if defaults.object(forKey: Key.wakeDisplay) != nil { wakeDisplayEnabled = defaults.bool(forKey: Key.wakeDisplay) }
         if defaults.object(forKey: Key.autoUnlock) != nil { autoUnlockEnabled = defaults.bool(forKey: Key.autoUnlock) }
         if defaults.object(forKey: Key.autoLock) != nil { autoLockEnabled = defaults.bool(forKey: Key.autoLock) }
+        // 只在键存在时读取：`bool(forKey:)` 对缺失键返回 false，会把默认的「显示」覆盖成隐藏。
+        if defaults.object(forKey: Key.menuBarIconVisible) != nil { menuBarIconVisible = defaults.bool(forKey: Key.menuBarIconVisible) }
     }
 
     private func persist(_ value: Any, _ key: String) {

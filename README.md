@@ -64,7 +64,7 @@ open -a /Applications/MacBleUnlock.app
 | 立即锁定 | 手动锁屏；之后必须「先离开再靠近」才会自动解锁 |
 | 打开日志 | 把日志过滤条件复制到剪贴板并打开控制台 |
 | 检查更新 | 读 GitHub Releases 的最新 tag 与当前版本比对：已是最新 / 发现新版后一键把 dmg 下到「下载」并在 Finder 中选中 / 打开发布页。失败时显示原因（如「网络不可用」「HTTP 403」），点一下重试 |
-| 版本 | 菜单底部显示 `版本 1.1.0 (1)`，直接读当前运行的 `.app` 的 `CFBundleShortVersionString` / `CFBundleVersion`（源头是 `project.yml`），不缓存 |
+| 版本 | 菜单底部显示 `版本 1.1.0`，直接读当前运行的 `.app` 的 `CFBundleShortVersionString`（源头是 `project.yml`），不缓存；构建号 `CFBundleVersion` 一直是 1，不显示 |
 
 ### 「检查更新」怎么工作
 

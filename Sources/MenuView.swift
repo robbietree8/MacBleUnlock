@@ -126,12 +126,12 @@ struct MenuView: View {
     ///
     /// 直接读 `Bundle.main`，不缓存：`.menu` 样式的菜单内容每次打开都重建，
     /// 所以从 Finder 里替换 `.app` 后不用重启菜单就能看到新版本。
-    /// 版本号来自 `project.yml` 的 `CFBundleShortVersionString` / `CFBundleVersion`。
+    /// 只显示 `CFBundleShortVersionString`（源头是 `project.yml`）：构建号
+    /// `CFBundleVersion` 一直是 1，每次发布都跟着变的是这个短版本号，多显示一个
+    /// 不动的括号数字只是噪音。
     private var versionText: String {
-        let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
-        let build = info?["CFBundleVersion"] as? String ?? "?"
-        return "版本 \(short) (\(build))"
+        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        return "版本 \(short)"
     }
 
     /// 换过签名证书后，钥匙串里属于旧身份的条目会读不出来（历史上它还会把 App 卡在启动阶段）。
